@@ -4,204 +4,117 @@ import json
 import os
 import io
 import sys
-from utils.Utils import Utils
-from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from apiclient.http import MediaFileUpload, MediaIoBaseDownload
+import shutil
 
-API_URL = ['https://www.googleapis.com/auth/drive']
 CONFIGS = None
 
-class Drive():
-    def __init__(self):
-        creds = None
+class LocalFolder(object):
+    def __init__(self, local_folder_path, network_folder_path):
+        self.local_path = local_folder_path
+        self.network_path = network_folder_path
+
+    # Get file timestamp
+    def get_file_timestamp(cls, file_path):
+        return int(os.path.getmtime(file_path))
+
+
+    # List files on local or network folders
+    def list_files(self, folder_path):
+        return os.listdir(folder_path)  
+
+
+    # 'Download' (Network -> Local) or 'Upload' (Local -> Network) file between network and local folders
+    def copy_file(self, source_path, dest_path, download = True, update = False):
+        # Get filename from path
+        filename = source_path.rsplit('/', 1)[-1]
+
+        # Copy file between folders
+        try: 
+            shutil.copyfile(source_path, dest_path)
+
+            file_timestamp = self.get_file_timestamp(source_path)
+            os.utime(dest_path, (file_timestamp, file_timestamp)) # Change modification time to match both files
+        except:
+            print("Error copying '{}' from {} to {}.".format(filename, source_path, dest_path))
+            return False
         
-        # Checks if authentication token exists, then load it
-        if os.path.exists('token.pickle'):
-            with open('token.pickle', 'rb') as token:
-                creds = pickle.load(token)
-
-        # Create new authencation token if it does not exist or has expired
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    'credentials.json', API_URL)
-                creds = flow.run_local_server(port=0)
-
-            with open('token.pickle', 'wb') as token:
-                pickle.dump(creds, token)
-
-        self.__service = build('drive', 'v3', credentials=creds)
-    
-
-    # List all files inside specified Drive folder
-    def list_files(self, folder_id):
-        # Call API
-        response = self.__service.files().list(q="'{}' in parents".format(folder_id), fields='files(id,name,modifiedTime,mimeType)').execute()
-
-        # Return all file names
-        files_dic = {"all": response.get('files', []), "names": []}
-        for item in files_dic['all']:
-            files_dic['names'].append(item['name'])
-        
-        return files_dic
-    
-
-    # Download file from drive to local folder
-    def download_file(self, filename, local_path, file_id, update=False):
-        local_absolute_path = "{}\\{}".format(local_path, filename)
-
-        # Request for download API
-        request = self.__service.files().get_media(fileId=file_id)
-        
-        # File stream
-        fh = io.BytesIO()
-
-        # Setup request and file stream
-        downloader = MediaIoBaseDownload(fh, request)
-        
-        # Wait while file is being downloaded
-        done = False
-        while done is False:
-            done = downloader.next_chunk()
-
-        # Save download buffer to file
-        with open(local_absolute_path, 'wb') as out: 
-            out.write(fh.getbuffer())
-
-        # Change local modification time to match remote
-        modified_time = self.__service.files().get(fileId=file_id, fields='modifiedTime').execute()['modifiedTime']
-        modified_timestamp = Utils.convert_datetime_timestamp(modified_time)
-        os.utime(local_absolute_path, (modified_timestamp, modified_timestamp))
-
-        if update != False:
-            print("\nLocal file '{}' updated successfully in folder '{}'.".format(filename, local_absolute_path.rsplit('\\', 2)[-2]))
+        # Print result
+        if update == True:
+            print("\nFile '{}' updated successfully in folder '{}'.".format(filename, dest_path))
+        elif download == True:
+            print("\nFile '{}' downloaded successfully in folder '{}'.".format(filename, dest_path))
         else:
-            print("\nFile '{}' downloaded successfully in folder '{}'.".format(filename, local_absolute_path.rsplit('\\', 2)[-2]))
+            print("\nFile '{}' uploaded successfully in folder '{}'.".format(filename, dest_path))
+
+        return True
 
 
-    # Upload file from local to drive folder
-    def upload_file(self, filename, local_path, folder_id, update=False):
-        local_absolute_path = "{}\\{}".format(local_path, filename)
+    # Recursive method to synchronize all folder and files between both folders
+    def synchronize(self, local_folder_path = None, network_folder_path = None):
+        # print("------------- Synchronizing folder '{}' -------------".format(local_path.rsplit('\\', 1)[-1]), end="\r")
+        
+        # First iteration (set path as root folders)
+        if local_folder_path == None:
+            local_folder_path = self.local_path
 
-        # Custom file metadata for upload (modification time matches local)
-        modified_timestamp = Utils.get_local_file_timestamp(local_absolute_path)
-        file_metadata = {'name': filename, 'modifiedTime': Utils.convert_timestamp_datetime(modified_timestamp), 'parents': [folder_id]}
+        if network_folder_path == None:
+            network_folder_path = self.network_path
 
-        # File definitions for upload
-        media = MediaFileUpload(local_absolute_path)
+        # Check if folder paths exists, if not, creates folder
+        if not os.path.exists(local_folder_path):
+            os.makedirs(local_folder_path)
 
-        # Send POST request for upload API
-        try:
-            if update != False:
-                uploaded_file = self.__service.files().update(fileId=update, media_body=media).execute()
-                print("\nRemote file '{}' updated successfully in folder '{}'.".format(filename, local_absolute_path.rsplit('\\', 2)[-2]))
-            else:
-                uploaded_file = self.__service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-                print("\nFile '{}' uploaded successfully in folder '{}'.".format(filename, local_absolute_path.rsplit('\\', 2)[-2]))
+        if not os.path.exists(network_folder_path):
+            os.makedirs(network_folder_path)
 
-            return uploaded_file
-        except:
-            print('\nError uploading file: {}'.format(filename))
+        # List local and network files
+        local_files = self.list_files(local_folder_path)
+        network_files = self.list_files(network_folder_path)
 
-            return False
-
-
-    # Create folder with respective parent Folder ID
-    def upload_folder(self, foldername, folder_id):
-        # Custom folder metadata for upload
-        folder_metadata = {'name': foldername, 'parents': [folder_id], 'mimeType': 'application/vnd.google-apps.folder'}
-
-        try:
-            # Send POST request for upload API
-            uploaded_folder = self.__service.files().create(body=folder_metadata).execute()
-            print('\nRemote folder created: {}'.format(uploaded_folder['name']))
-
-            return uploaded_folder['id']
-        except:
-            print('\nError creating folder...')
-
-            return False
-
-
-    # Verifies if file was modified or not
-    def compare_files(self, local_file_data, remote_file_data):
-        modified = False
-
-        if local_file_data['modifiedTime'] > remote_file_data['modifiedTime']:
-            modified = 'local'    
-        elif local_file_data['modifiedTime'] < remote_file_data['modifiedTime']:
-            modified = 'remote'
-
-        return modified
-
-
-    # Recursive method to synchronize all folder and files
-    def synchronize(self, local_path, folder_id):
-        print("------------- Synchronizing folder '{}' -------------".format(local_path.rsplit('\\', 1)[-1]), end="\r")
-
-        # Check if local path exists, if not, creates folder
-        if not os.path.exists(local_path):
-            os.makedirs(local_path)
-
-        # List remote and local files
-        drive_files = self.list_files(folder_id)
-        local_files = Utils.list_local_files(local_path)
-
-        # Compare files with same name in both origins and check which is newer, updating
-        same_files = list(set(drive_files['names']) & set(local_files))
+        # Compare files (and folders, recursively) with same name in both origins
+        # If any file is newer, update
+        same_files = list(set(local_files) & set(network_files))
         for sm_file in same_files:
-            local_absolute_path = "{}\\{}".format(local_path, sm_file)
-
-            remote_file_data = next(item for item in drive_files['all'] if item["name"] == sm_file) # Filter to respective file
-            remote_file_data["modifiedTime"] = Utils.convert_datetime_timestamp(remote_file_data["modifiedTime"])
-
-            local_file_data = {}
-            local_file_data["name"] = sm_file
-            local_file_data["modifiedTime"] = Utils.get_local_file_timestamp(local_absolute_path)
+            local_absolute_path = "{}/{}".format(local_folder_path, sm_file)
+            network_absolute_path = "{}/{}".format(network_folder_path, sm_file)
 
             # Checks if files were modified on any origin
-            modified = self.compare_files(local_file_data, remote_file_data)
+            local_file_mtime = self.get_file_timestamp(local_absolute_path)
+            network_file_mtime = self.get_file_timestamp(network_absolute_path)
 
-            if modified == 'local':
+            # Modification in local file
+            if local_file_mtime > network_file_mtime:
                 if os.path.isdir(local_absolute_path):
-                    self.synchronize(local_absolute_path, remote_file_data['id'])
+                    self.synchronize(local_absolute_path, network_absolute_path) # Recursively synchronize files inside another folder
                 else:
-                    self.upload_file(sm_file, local_path, folder_id, remote_file_data['id'])
+                    self.copy_file(local_absolute_path, network_absolute_path, False, True) # Upload
     
-            elif modified == 'remote':
-                if remote_file_data["mimeType"] == 'application/vnd.google-apps.folder':
-                    self.synchronize(local_absolute_path, remote_file_data['id'])
+            # Modification in network file
+            elif local_file_mtime < network_file_mtime:
+                if os.path.isdir(network_absolute_path):
+                    self.synchronize(local_absolute_path, network_absolute_path) # Recursively synchronize files inside another folder
                 else:
-                    self.download_file(sm_file, local_path, remote_file_data['id'], True)
+                    self.copy_file(network_absolute_path, local_absolute_path, True, True) # Download
 
         # Compare different files in both origins and download/upload what is needed
-        different_files = list(set(drive_files['names']) ^ set(local_files))
+        different_files = list(set(local_files) ^ set(network_files))
         for diff_file in different_files:
-            # IF file is only on Google Drive (DOWNLOAD)
-            if diff_file in drive_files['names']:
-                for remote_file in drive_files['all']:
-                    if remote_file['name'] == diff_file:
-                        if remote_file['mimeType'] == 'application/vnd.google-apps.folder':
-                            local_absolute_path = "{}\\{}".format(local_path, diff_file)
-                            self.synchronize(local_absolute_path, remote_file['id']) # Recursive to download files inside folders
-                        else:
-                            self.download_file(remote_file['name'], local_path, remote_file['id'])
+            local_absolute_path = "{}/{}".format(local_folder_path, diff_file)
+            network_absolute_path = "{}/{}".format(network_folder_path, diff_file)
 
-            # IF file is only on local (UPLOAD)
-            else:
-                local_absolute_path = "{}\\{}".format(local_path, diff_file)
-
-                # Check if path redirects to a file or folder
-                if os.path.isdir(local_absolute_path):
-                    created_folder_id = self.upload_folder(diff_file, folder_id)
-                    if created_folder_id != False:
-                        self.synchronize(local_absolute_path, created_folder_id) # Recursive to upload files inside folders
+            # Download if file is only on network
+            if diff_file in network_files:
+                if os.path.isdir(network_absolute_path):
+                    self.synchronize(local_absolute_path, network_absolute_path) # Recursively synchronize files inside another folder
                 else:
-                    self.upload_file(diff_file, local_path, folder_id)
+                    self.copy_file(network_absolute_path, local_absolute_path, True) # Download
+
+            # Upload if file is only local
+            else:
+                if os.path.isdir(local_absolute_path):
+                    self.synchronize(local_absolute_path, network_absolute_path) # Recursively synchronize files inside another folder
+                else:
+                    self.copy_file(local_absolute_path, network_absolute_path, False) # Upload
 
 
 def main():
@@ -212,17 +125,10 @@ def main():
     except:
         print("Please rename example file 'configs-example.json' to 'configs.json' and update all fields.")
         return
-    
-    # Logs STDOUT to file if exists
-    if CONFIGS["log_file_path"] != False:
-        sys.stdout = open(CONFIGS["log_file_path"], 'a')
-        
-        from datetime import datetime
-        print("\n******* Log date: {} *******\n".format(datetime.now().strftime("%d/%m/%Y %H:%M:%S")))
 
-    # Instantiate Drive class and synchronize files
-    my_drive = Drive()
-    my_drive.synchronize(CONFIGS['local_folder_path'], CONFIGS['drive_folder_id'])
+    # Instantiate LocalFolder class and synchronize files between local and network folders
+    local_folder = LocalFolder(CONFIGS['local_folder_path'], CONFIGS['network_folder_path'])
+    local_folder.synchronize()
 
 
 if __name__ == '__main__':
